@@ -291,3 +291,163 @@ In summary:
 - **ObjFunction**: Represents the compiled function code.
 - **Stack-based Execution**: The VM uses a stack to manage function calls and local variables efficiently.
 - **Frame Pointer**: Keeps track of where local variables start on the stack for each function call.
+
+1. **Compiler Reorganization for Function Compilation**:  
+   The compiler now compiles code into *functions* instead of directly into a single chunk. Even the "top-level" code in a script is compiled as if it were wrapped inside an implicit `main()` function, ensuring the VM always runs code inside function bodies. This adds flexibility for future user-defined functions and helps with managing local variables, recursion, and return addresses.
+
+2. **Compiler Structure Adjustments**:  
+   - The `Compiler` struct now has a reference to an `ObjFunction` instead of a direct `Chunk`. This allows the compiler to handle separate chunks for different functions.
+   - A `FunctionType` enum is added to differentiate between top-level (script) code and user-defined functions.
+
+3. **Creating Functions at Compile Time**:  
+   Functions are created during the compilation process. The compiler constructs `ObjFunction` objects, which hold the compiled code. For the top-level script, this is done implicitly.
+
+4. **Call Frames**:  
+   - **CallFrame Struct**: Tracks information about each active function call, such as the function's code (`ObjFunction*`), the instruction pointer (`ip`), and the pointer to the start of the function’s locals on the VM's value stack.
+   - **Handling Local Variables**: Local variables are managed by assigning them slots on the VM's stack, which are relative to the function’s starting point in the stack (referred to as the function’s *call frame*). This allows multiple calls to the same function (recursion) to have their own independent stack slots.
+
+5. **Stack-based Function Calls**:  
+   - **Return Addresses**: When a function call is made, the VM stores the instruction pointer (`ip`) of the caller so it can resume execution at the correct location after the function returns.
+   - **Call Stack**: The VM uses a fixed-size array to store `CallFrame` objects for function calls. This stack-like structure allows functions to return in the correct order, ensuring efficient memory usage while avoiding dynamic allocation for function calls.
+
+6. **Modifying the VM**:  
+   - The instruction pointer (`ip`) and the chunk being executed are now stored in the `CallFrame`, not the VM directly.
+   - Instructions that access local variables now do so relative to the current function’s frame instead of the bottom of the stack.
+   - The bytecode execution loop is updated to handle these changes, accessing the current frame’s `ip` for reading instructions and manipulating the stack accordingly.
+
+These changes allow the compiler and VM to efficiently handle multiple function calls, recursion, and local variables within a stack-based system, while keeping the runtime overhead low by avoiding dynamic allocations. The implementation also makes it easier to extend the language with new features like user-defined functions.
+
+## Explain Callframe
+
+A **CallFrame** is essential for handling function calls and returns because a function may call another function, and the VM needs to know where to return once the called function finishes execution. In languages that support recursion, you can have multiple invocations of the same function active at once, each with its own set of local variables and return address. The CallFrame helps manage this by treating each function call as a distinct "frame" on a stack of function calls.
+
+### Key components of a **CallFrame**:
+
+1. **`ObjFunction* function`**: This points to the function being called. It contains the bytecode (compiled instructions) and metadata like the function’s constants and name.
+   
+2. **`uint8_t* ip`**: The instruction pointer (IP) for the function. This points to the current position in the function’s bytecode. As the VM interprets the bytecode, it advances this pointer.
+
+3. **`Value* slots`**: This points to the location in the VM’s stack where the function’s local variables are stored. When a function is called, it is given a section of the stack, and `slots` marks where that section begins.
+
+### Why is it needed?
+When a function is called, the VM needs to store:
+- Where to return to (the return address) after the function finishes.
+- The local variables and temporary values that the function uses.
+- The position in the bytecode (instruction pointer) where the function is currently executing.
+
+By using a **CallFrame**, the VM can keep track of all this information in a structured way. When a function is called, the VM creates a new **CallFrame** for that call. When the function returns, the VM removes the frame from the stack and goes back to the previous one, resuming execution from the point where the function was called.
+
+### Example of how CallFrames are used:
+
+If we have the following code:
+```lox
+fun first() {
+    var a = 1;
+    second();
+    var b = 2;
+}
+
+fun second() {
+    var c = 3;
+    var d = 4;
+}
+
+first();
+```
+
+1. When `first()` is called, a **CallFrame** is created for it. It tracks the local variables `a` and `b`, the instruction pointer in `first()`, and the return address (where to go after `first()` completes).
+   
+2. Inside `first()`, the function `second()` is called. Now a new **CallFrame** is created for `second()`, with its own local variables `c` and `d`. The return address in this frame points back to where `second()` was called in `first()`.
+
+3. After `second()` completes, the VM pops the **CallFrame** for `second()` off the stack, and execution resumes in `first()`.
+
+
+
+## How Virtual Machine handle function calls
+
+### 1. Allocating Local Variables Across Multiple Functions
+
+When multiple functions are in a program, each of them has its own set of **local variables**. Managing how these variables are stored efficiently in the VM is tricky. One early option (used in Fortran) was **static allocation**, where each function’s local variables were allocated a fixed space in memory. However, this approach is wasteful and doesn’t allow for recursion (since each function needs its own memory for local variables every time it is called).
+
+In modern approaches, **local variables** are stored on a **stack** instead of fixed memory locations. This is because variables generally follow a **last-in, first-out (LIFO)** behavior, especially across function calls. When a function is called, its local variables are pushed onto the stack. When the function ends, its variables are popped off the stack, freeing up memory for the next function call.
+
+### 2. Recursion and Stack-based Allocation
+
+Recursion allows functions to call themselves, requiring multiple sets of local variables for each function instance. If we used static memory allocation, recursion would be impossible because each call would overwrite the previous set of variables.
+
+In a stack-based system:
+- Each time a function is called, its **local variables** are pushed onto the stack.
+- When the function returns, those variables are popped off.
+- Even with recursive function calls, each function’s variables are safely stored on the stack and don’t interfere with others.
+
+For example:
+```lox
+fun first() {
+  var a = 1;
+  second();
+  var b = 2;
+}
+
+fun second() {
+  var c = 3;
+  var d = 4;
+}
+```
+
+Here, when `first()` calls `second()`, the variables `c` and `d` are pushed onto the stack. Once `second()` completes, they are popped off, and execution returns to `first()` where `b` is then pushed onto the stack.
+
+### 3. Function Call Frames
+
+A **call frame** (or activation record) is a structure that holds all the information the VM needs to execute a function. It includes:
+- The **function's bytecode**.
+- The **instruction pointer (IP)** to track where in the bytecode the function is currently executing.
+- A reference to the **stack position** where the function’s local variables are stored.
+
+Whenever a function is called, the VM creates a new **CallFrame** and pushes it onto the call stack. When the function finishes, the frame is popped off, and the VM returns to the previous call.
+
+### 4. Relative Slot Allocation
+
+One key challenge is that the compiler can’t know at compile time where in the stack a function’s local variables will be stored. The VM’s stack is dynamic, and the position of a function's local variables changes depending on how deeply nested the function calls are.
+
+To solve this, the VM uses a **frame pointer**, which is a reference to the starting location of a function’s local variables on the stack. When the VM executes a function, it calculates each variable's position **relative** to the frame pointer. So, instead of hardcoding a slot for each variable, it dynamically calculates the actual position when the function is called.
+
+For example:
+```lox
+fun first() {
+  var a = 1;
+  second();
+  var b = 2;
+  second();
+}
+
+fun second() {
+  var c = 3;
+  var d = 4;
+}
+```
+- During the first call to `second()`, variables `c` and `d` are placed in certain stack slots.
+- During the second call, since `b` has already been allocated a slot, `c` and `d` are placed in different slots.
+The key is that the relative positions of `c` and `d` within `second()` are the same, but their **absolute positions** in the stack differ between calls.
+
+### 5. Return Addresses
+
+After a function is called, the VM needs to know **where to return** in the calling function once the called function completes. This is managed using a **return address**, which is stored in the **CallFrame**. When the function finishes executing, the VM uses the return address to jump back to the instruction immediately after the function call in the caller.
+
+### 6. The Call Stack
+
+The **call stack** is an array of **CallFrames**. Each function call creates a new frame that contains:
+- The function's bytecode.
+- The current position in the bytecode (`ip`).
+- The pointer to the location in the stack where the function's local variables begin.
+
+By using the stack, the VM efficiently manages function calls, local variables, and return addresses. After the function completes, the corresponding **CallFrame** is popped off the stack, and the VM resumes execution from the caller.
+
+### Summary
+
+To handle function calls:
+1. **Local variables** are dynamically allocated on the stack.
+2. **Recursion** is handled by giving each function call its own space on the stack for local variables.
+3. Each function call is represented by a **CallFrame** containing the instruction pointer, local variable storage, and return address.
+4. When a function is called, the VM creates a **CallFrame** and pushes it onto the call stack. When the function finishes, the frame is popped off.
+
+This approach balances performance and flexibility, allowing efficient function calls while supporting recursion and dynamic memory allocation for local variables.
